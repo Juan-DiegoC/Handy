@@ -393,6 +393,92 @@ The goal is to create both a useful tool and a foundation for others to build up
   </a>
 </div>
 
+## Claude AI Integration (This Fork)
+
+This fork adds a second hotkey that records your voice, transcribes it locally with Whisper, sends it to an AI backend, and displays the response in a minimal dark overlay that slides down from the top of your screen.
+
+### How It Works
+
+```
+fn+j pressed (toggle on)
+  → Handy records your voice
+  → Whisper transcribes locally
+  → python3 ~/.handy_claude.py "<transcript>" is spawned
+  → Script calls an OpenAI-compatible API endpoint
+  → Dark overlay slides in from top of screen with the response
+fn+j pressed again (toggle off) → stops recording & sends
+```
+
+### Hotkeys
+
+| Key | Action |
+|-----|--------|
+| `fn+j` | Ask AI — press once to start recording, press again to stop & send |
+| `fn+k` | Transcribe — types speech directly into whatever app is focused |
+
+### Setup
+
+**1. Prerequisites**
+
+```bash
+# Install Python openai package
+pip3 install openai
+
+# Install a Whisper model (if not already present)
+mkdir -p ~/Library/Application\ Support/com.pais.handy/models
+curl -L -o ~/Library/Application\ Support/com.pais.handy/models/ggml-base.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+```
+
+**2. Create the overlay script**
+
+Create `~/.handy_claude.py` — see the [example script](.handy_claude.py.example) in this repo. At the top, set your endpoint:
+
+```python
+PROXY_BASE_URL = "http://localhost:8317/v1"  # any OpenAI-compatible endpoint
+API_KEY        = "your-api-key"
+MODEL          = "claude-haiku-4-5-20251001"
+```
+
+Any OpenAI-compatible endpoint works:
+
+| Service | `PROXY_BASE_URL` | Example `MODEL` |
+|---------|-----------------|-----------------|
+| CLIProxyAPI (local Claude proxy) | `http://localhost:8317/v1` | `claude-haiku-4-5-20251001` |
+| Ollama (local) | `http://localhost:11434/v1` | `llama3.2` |
+| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `anthropic/claude-3.5-sonnet` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+
+**3. Build & run from source**
+
+```bash
+# Install dependencies
+brew install cmake          # required by whisper-rs
+curl -fsSL https://bun.sh/install | bash   # frontend package manager
+rustup update stable        # Rust 1.88+ required
+
+# Clone and run
+git clone https://github.com/Juan-DiegoC/handy.git
+cd handy
+bun install
+bun run tauri dev
+```
+
+### Changing the AI Endpoint
+
+Edit only the top 3 lines of `~/.handy_claude.py` — no rebuild needed, the script is read fresh on every invocation.
+
+### Files Changed from Upstream
+
+| File | Change |
+|------|--------|
+| `src-tauri/src/actions.rs` | Added `ClaudeAction` with toggle-mode recording; spawns `~/.handy_claude.py` after transcription instead of pasting |
+| `src-tauri/src/settings.rs` | Added `"claude"` shortcut binding (default: `fn+j`) |
+| `~/.handy_claude.py` | New file — Python overlay script (not in repo, lives in home directory) |
+
+---
+
 ## Related Projects
 
 - **[Handy CLI](https://github.com/cjpais/handy-cli)** - The original Python command-line version

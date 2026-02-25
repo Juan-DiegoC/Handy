@@ -15,6 +15,7 @@ use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use log::{debug, error, warn};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::AppHandle;
@@ -532,15 +533,12 @@ impl ShortcutAction for TranscribeAction {
 }
 
 // Claude Action
-struct ClaudeAction;
+struct ClaudeAction {
+    is_recording: Arc<AtomicBool>,
+}
 
-impl ShortcutAction for ClaudeAction {
-    fn start(&self, app: &AppHandle, binding_id: &str, shortcut_str: &str) {
-        // Delegate entirely to TranscribeAction::start() for identical recording behaviour
-        TranscribeAction { post_process: false }.start(app, binding_id, shortcut_str);
-    }
-
-    fn stop(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
+impl ClaudeAction {
+    fn do_stop(&self, app: &AppHandle, binding_id: &str) {
         // Unregister the cancel shortcut when transcription stops
         shortcut::unregister_cancel_shortcut(app);
 
@@ -669,6 +667,22 @@ impl ShortcutAction for ClaudeAction {
     }
 }
 
+impl ShortcutAction for ClaudeAction {
+    fn start(&self, app: &AppHandle, binding_id: &str, shortcut_str: &str) {
+        // Toggle mode: first press starts recording, second press stops
+        if self.is_recording.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            TranscribeAction { post_process: false }.start(app, binding_id, shortcut_str);
+        } else {
+            self.is_recording.store(false, Ordering::SeqCst);
+            self.do_stop(app, binding_id);
+        }
+    }
+
+    fn stop(&self, _app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {
+        // Ignore key release — toggle mode only responds to key press
+    }
+}
+
 // Cancel Action
 struct CancelAction;
 
@@ -720,7 +734,9 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
     );
     map.insert(
         "claude".to_string(),
-        Arc::new(ClaudeAction) as Arc<dyn ShortcutAction>,
+        Arc::new(ClaudeAction {
+            is_recording: Arc::new(AtomicBool::new(false)),
+        }) as Arc<dyn ShortcutAction>,
     );
     map.insert(
         "cancel".to_string(),
