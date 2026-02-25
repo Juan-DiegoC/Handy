@@ -531,6 +531,144 @@ impl ShortcutAction for TranscribeAction {
     }
 }
 
+// Claude Action
+struct ClaudeAction;
+
+impl ShortcutAction for ClaudeAction {
+    fn start(&self, app: &AppHandle, binding_id: &str, shortcut_str: &str) {
+        // Delegate entirely to TranscribeAction::start() for identical recording behaviour
+        TranscribeAction { post_process: false }.start(app, binding_id, shortcut_str);
+    }
+
+    fn stop(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
+        // Unregister the cancel shortcut when transcription stops
+        shortcut::unregister_cancel_shortcut(app);
+
+        let stop_time = Instant::now();
+        debug!("ClaudeAction::stop called for binding: {}", binding_id);
+
+        let ah = app.clone();
+        let rm = Arc::clone(&app.state::<Arc<AudioRecordingManager>>());
+        let tm = Arc::clone(&app.state::<Arc<TranscriptionManager>>());
+        let hm = Arc::clone(&app.state::<Arc<HistoryManager>>());
+
+        change_tray_icon(app, TrayIconState::Transcribing);
+        show_transcribing_overlay(app);
+
+        // Unmute before playing audio feedback so the stop sound is audible
+        rm.remove_mute();
+
+        // Play audio feedback for recording stop
+        play_feedback_sound(app, SoundType::Stop);
+
+        let binding_id = binding_id.to_string();
+
+        tauri::async_runtime::spawn(async move {
+            let _guard = FinishGuard(ah.clone());
+            let binding_id = binding_id.clone();
+            debug!(
+                "ClaudeAction: starting async transcription task for binding: {}",
+                binding_id
+            );
+
+            let stop_recording_time = Instant::now();
+            if let Some(samples) = rm.stop_recording(&binding_id) {
+                debug!(
+                    "Recording stopped and samples retrieved in {:?}, sample count: {}",
+                    stop_recording_time.elapsed(),
+                    samples.len()
+                );
+
+                let transcription_time = Instant::now();
+                let samples_clone = samples.clone();
+                match tm.transcribe(samples) {
+                    Ok(transcription) => {
+                        debug!(
+                            "Transcription completed in {:?}: '{}'",
+                            transcription_time.elapsed(),
+                            transcription
+                        );
+                        if !transcription.is_empty() {
+                            let settings = get_settings(&ah);
+                            let mut final_text = transcription.clone();
+
+                            // Apply Chinese variant conversion if needed
+                            if let Some(converted_text) =
+                                maybe_convert_chinese_variant(&settings, &transcription).await
+                            {
+                                final_text = converted_text;
+                            }
+
+                            // Save to history (no post-processing for claude route)
+                            let hm_clone = Arc::clone(&hm);
+                            let transcription_for_history = transcription.clone();
+                            let final_text_for_history = final_text.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let post_processed = if final_text_for_history != transcription_for_history {
+                                    Some(final_text_for_history)
+                                } else {
+                                    None
+                                };
+                                if let Err(e) = hm_clone
+                                    .save_transcription(
+                                        samples_clone,
+                                        transcription_for_history,
+                                        post_processed,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    error!("ClaudeAction: failed to save transcription to history: {}", e);
+                                }
+                            });
+
+                            // Spawn python3 ~/.handy_claude.py "<transcript>" instead of pasting
+                            let home = std::env::var("HOME").unwrap_or_default();
+                            let script_path = format!("{}/.handy_claude.py", home);
+                            let transcript_arg = final_text.clone();
+                            let ah_clone = ah.clone();
+                            ah.run_on_main_thread(move || {
+                                match std::process::Command::new("python3")
+                                    .arg(&script_path)
+                                    .arg(&transcript_arg)
+                                    .spawn()
+                                {
+                                    Ok(_) => debug!("ClaudeAction: spawned python3 {} successfully", script_path),
+                                    Err(e) => error!("ClaudeAction: failed to spawn python3 {}: {}", script_path, e),
+                                }
+                                utils::hide_recording_overlay(&ah_clone);
+                                change_tray_icon(&ah_clone, TrayIconState::Idle);
+                            })
+                            .unwrap_or_else(|e| {
+                                error!("ClaudeAction: failed to run on main thread: {:?}", e);
+                                utils::hide_recording_overlay(&ah);
+                                change_tray_icon(&ah, TrayIconState::Idle);
+                            });
+                        } else {
+                            utils::hide_recording_overlay(&ah);
+                            change_tray_icon(&ah, TrayIconState::Idle);
+                        }
+                    }
+                    Err(err) => {
+                        debug!("ClaudeAction: transcription error: {}", err);
+                        utils::hide_recording_overlay(&ah);
+                        change_tray_icon(&ah, TrayIconState::Idle);
+                    }
+                }
+            } else {
+                debug!("ClaudeAction: no samples retrieved from recording stop");
+                utils::hide_recording_overlay(&ah);
+                change_tray_icon(&ah, TrayIconState::Idle);
+            }
+        });
+
+        debug!(
+            "ClaudeAction::stop completed in {:?}",
+            stop_time.elapsed()
+        );
+    }
+}
+
 // Cancel Action
 struct CancelAction;
 
@@ -579,6 +717,10 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
     map.insert(
         "transcribe_with_post_process".to_string(),
         Arc::new(TranscribeAction { post_process: true }) as Arc<dyn ShortcutAction>,
+    );
+    map.insert(
+        "claude".to_string(),
+        Arc::new(ClaudeAction) as Arc<dyn ShortcutAction>,
     );
     map.insert(
         "cancel".to_string(),
