@@ -679,6 +679,16 @@ pub fn get_default_settings() -> AppSettings {
             current_binding: "escape".to_string(),
         },
     );
+    bindings.insert(
+        "claude".to_string(),
+        ShortcutBinding {
+            id: "claude".to_string(),
+            name: "Claude".to_string(),
+            description: "Sends your speech to Claude AI.".to_string(),
+            default_binding: "ctrl+shift+j".to_string(),
+            current_binding: "ctrl+shift+j".to_string(),
+        },
+    );
 
     AppSettings {
         bindings,
